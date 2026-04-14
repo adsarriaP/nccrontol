@@ -12914,22 +12914,11 @@
         function adminToday() { return new Date().toISOString().slice(0, 10); }
 
         function loadStaff() {
-            if (wgCache.staff) return wgCache.staff;
-            // Staff is API-backed only; avoid localStorage fallback.
-            wgCache.staff = [];
-            return wgCache.staff;
+            const arr = adminSafeJSONParse(localStorage.getItem(ADMIN_STAFF_KEY) || '[]', []);
+            if (Array.isArray(arr) && arr.length) return arr;
+            return [];
         }
-        async function saveStaff(arr) {
-            const prev = Array.isArray(wgCache.staff) ? wgCache.staff.map(s => ({ ...s })) : [];
-            wgCache.staff = Array.isArray(arr) ? arr.map(s => ({ ...s })) : [];
-            try {
-                await wgSyncStaffToApi(wgCache.staff);
-                return true;
-            } catch {
-                wgCache.staff = prev;
-                return false;
-            }
-        }
+        function saveStaff(arr) { localStorage.setItem(ADMIN_STAFF_KEY, JSON.stringify(arr)); }
 
         function loadAttendance() { return adminSafeJSONParse(localStorage.getItem(ADMIN_ATT_KEY) || '{}', {}); }
         function saveAttendance(obj) { localStorage.setItem(ADMIN_ATT_KEY, JSON.stringify(obj)); }
@@ -13024,7 +13013,7 @@
             openModal('modalEmpleado');
         }
 
-        async function saveEmpleadoFromModal() {
+        function saveEmpleadoFromModal() {
             const id = document.getElementById('empId').value || adminUid();
             const nombre = (document.getElementById('empNombre').value || '').trim();
             const doc = (document.getElementById('empDoc').value || '').trim();
@@ -13056,11 +13045,7 @@
                 obj.contractFileName = window._empContractFileName || 'contrato';
             }
             if (idx >= 0) staff[idx] = obj; else staff.unshift(obj);
-            const saved = await saveStaff(staff);
-            if (!saved) {
-                showToast('❌ No se pudo guardar el empleado en la API.', true);
-                return;
-            }
+            saveStaff(staff);
             window._empCvData = null;
             window._empManipData = null;
             window._empMedicalData = null;
@@ -13071,16 +13056,12 @@
             showToast('✅ Empleado guardado');
         }
 
-        async function deleteEmpleado(empId) {
+        function deleteEmpleado(empId) {
             if (!confirm('¿Eliminar este empleado?')) return;
             let staff = loadStaff();
             const emp = staff.find(e => e.id === empId);
             staff = staff.filter(e => e.id !== empId);
-            const saved = await saveStaff(staff);
-            if (!saved) {
-                showToast('❌ No se pudo eliminar el empleado en la API.', true);
-                return;
-            }
+            saveStaff(staff);
             const att = loadAttendance();
             Object.keys(att).forEach(date => { if (att[date]?.[empId]) delete att[date][empId]; });
             saveAttendance(att);
@@ -15803,308 +15784,10 @@ ${de ? `<div class="campo"><b>De:</b> ${mEsc(de)}</div>` : ''}
 
         const DAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 
-        const WG_API_CANDIDATES = [
-            window.WG_API_BASE,
-            'http://localhost:3001/dec/workergoal',
-            'http://localhost:3000/dec/workergoal',
-        ].filter(Boolean);
-        const WG_SYNC_TOAST_SHOWN = {};
-        const wgCache = { config: null, users: null, staff: null };
-        let wgResolvedApiBase = WG_API_CANDIDATES[0];
-        let wgApiConnectedToastShown = false;
-
-        async function wgFetch(path, options = {}) {
-            let lastErr = null;
-            for (const base of WG_API_CANDIDATES) {
-                try {
-                    const res = await fetch(base + path, options);
-                    if (!res.ok) throw new Error(`${options.method || 'GET'} ${path} -> ${res.status}`);
-                    wgResolvedApiBase = base;
-                    window.WG_API_CONNECTED = true;
-                    window.WG_API_BASE_ACTIVE = base;
-                    if (res.status === 204) return null;
-                    return res.json();
-                } catch (err) {
-                    lastErr = err;
-                }
-            }
-            throw lastErr || new Error('No API base available');
-        }
-
-        function wgWarnOnce(key, msg) {
-            if (WG_SYNC_TOAST_SHOWN[key]) return;
-            WG_SYNC_TOAST_SHOWN[key] = true;
-            showToast(msg, true);
-        }
-
-        function wgConfigUiToApi(c) {
-            return {
-                bizName: c.bizName || null,
-                bizSlogan: c.bizSlogan || null,
-                timezoneName: c.timezone || c.timezoneName || null,
-                monthOpen: c.monthOpen ?? null,
-                monthClose: c.monthClose ?? null,
-                themeMode: c.theme === 'light' ? 'light' : 'dark',
-                accentColor: c.accent || null,
-                fontSizePx: c.fontSize ?? null,
-                logoData: c.logoData || null,
-                foodStart: c.foodStart || null,
-                foodEnd: c.foodEnd || null,
-                foodEndReminderMinutes: Number(c.foodEndReminder || 0),
-                rawJson: {
-                    schedule: c.schedule || {},
-                    globalOpen: c.globalOpen || null,
-                    globalClose: c.globalClose || null,
-                    openReminder: c.openReminder || '0',
-                    lastUserId: c.lastUserId || null,
-                },
-            };
-        }
-
-        function wgConfigApiToUi(api) {
-            const raw = api?.rawJson || {};
-            return {
-                bizName: api?.bizName || '',
-                bizSlogan: api?.bizSlogan || '',
-                timezone: api?.timezoneName || 'America/Bogota',
-                monthOpen: api?.monthOpen ?? 1,
-                monthClose: api?.monthClose ?? 30,
-                theme: api?.themeMode || 'dark',
-                accent: api?.accentColor || '#f97316',
-                fontSize: api?.fontSizePx || 16,
-                logoData: api?.logoData || null,
-                foodStart: api?.foodStart || '',
-                foodEnd: api?.foodEnd || '',
-                foodEndReminder: String(api?.foodEndReminderMinutes ?? 0),
-                schedule: raw.schedule || {},
-                globalOpen: raw.globalOpen || '08:00',
-                globalClose: raw.globalClose || '22:00',
-                openReminder: raw.openReminder || '0',
-                lastUserId: raw.lastUserId || null,
-            };
-        }
-
-        function wgUserUiToApi(u) {
-            return {
-                id: u.id,
-                staffId: u.staffId || null,
-                fullName: u.name,
-                loginName: u.login,
-                passwordValue: u.pass,
-                roleName: u.role,
-                cargo: u.cargo || null,
-                statusName: u.status || 'active',
-                modulesJson: { modules: u.modules || [] },
-                modulePermsJson: { ...(u.modulePerms || {}), _ui_pass: u.pass || '' },
-            };
-        }
-
-        function wgUserApiToUi(u) {
-            const perms = (u.modulePermsJson && typeof u.modulePermsJson === 'object') ? u.modulePermsJson : {};
-            const modules = (u.modulesJson && Array.isArray(u.modulesJson.modules)) ? u.modulesJson.modules : [];
-            return {
-                id: u.id,
-                staffId: u.staffId || null,
-                name: u.fullName || '',
-                login: u.loginName || '',
-                pass: String(perms._ui_pass || ''),
-                cargo: u.cargo || '',
-                role: u.roleName || 'viewer',
-                status: u.statusName || 'active',
-                modules,
-                modulePerms: Object.fromEntries(Object.entries(perms).filter(([k]) => k !== '_ui_pass')),
-                createdAt: u.createdAt ? new Date(u.createdAt).getTime() : Date.now(),
-                updatedAt: u.updatedAt ? new Date(u.updatedAt).getTime() : null,
-            };
-        }
-
-        function wgStaffUiToApi(s) {
-            return {
-                id: s.id,
-                nombre: s.nombre,
-                docIdentidad: s.doc || null,
-                cargo: s.cargo || null,
-                fechaIngreso: s.ingreso || null,
-                fechaSalida: s.salida || null,
-                tipoContrato: s.tipoContrato || null,
-                pinCode: s.pin || null,
-                telefono: s.cel || null,
-                email: s.email || null,
-                direccion: s.dir || null,
-                cvFileName: s.cvFileName || null,
-                cvData: s.cvData || null,
-                manipFileName: s.manipFileName || null,
-                manipData: s.manipData || null,
-                medicalFileName: s.medicalFileName || null,
-                medicalData: s.medicalData || null,
-                contractFileName: s.contractFileName || null,
-                contractData: s.contractData || null,
-                extraJson: s.extraJson || null,
-            };
-        }
-
-        function wgStaffApiToUi(s) {
-            return {
-                id: s.id,
-                nombre: s.nombre || '',
-                doc: s.docIdentidad || '',
-                cargo: s.cargo || '',
-                ingreso: s.fechaIngreso || '',
-                salida: s.fechaSalida || '',
-                tipoContrato: s.tipoContrato || '',
-                pin: s.pinCode || '',
-                cel: s.telefono || '',
-                email: s.email || '',
-                dir: s.direccion || '',
-                cvFileName: s.cvFileName || '',
-                cvData: s.cvData || null,
-                manipFileName: s.manipFileName || '',
-                manipData: s.manipData || null,
-                medicalFileName: s.medicalFileName || '',
-                medicalData: s.medicalData || null,
-                contractFileName: s.contractFileName || '',
-                contractData: s.contractData || null,
-                extraJson: s.extraJson || null,
-            };
-        }
-
-        async function wgSyncConfigToApi(c) {
-            try { await wgFetch('/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(wgConfigUiToApi(c)) }); }
-            catch { wgWarnOnce('cfg_sync', '⚠️ Sin conexión con API (config). Se guardó local temporalmente.'); }
-        }
-
-        async function wgSyncUsersToApi(users) {
-            try {
-                const remote = await wgFetch('/users');
-                const remoteMap = new Map(remote.map(u => [u.id, u]));
-                const localMap = new Map(users.map(u => [u.id, u]));
-
-                for (const u of users) {
-                    const payload = wgUserUiToApi(u);
-                    if (remoteMap.has(u.id)) {
-                        await wgFetch('/users/' + encodeURIComponent(u.id), {
-                            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload),
-                        });
-                    } else {
-                        await wgFetch('/users', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload),
-                        });
-                    }
-                }
-
-                for (const ru of remote) {
-                    if (!localMap.has(ru.id)) {
-                        await wgFetch('/users/' + encodeURIComponent(ru.id), { method: 'DELETE' });
-                    }
-                }
-            } catch {
-                wgWarnOnce('users_sync', '⚠️ Sin conexión con API (usuarios). Se guardó local temporalmente.');
-            }
-        }
-
-        async function wgSyncStaffToApi(staff) {
-            try {
-                const remote = await wgFetch('/staff');
-                const remoteMap = new Map(remote.map(s => [s.id, s]));
-                const localMap = new Map(staff.map(s => [s.id, s]));
-
-                for (const s of staff) {
-                    const payload = wgStaffUiToApi(s);
-                    if (remoteMap.has(s.id)) {
-                        await wgFetch('/staff/' + encodeURIComponent(s.id), {
-                            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload),
-                        });
-                    } else {
-                        await wgFetch('/staff', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload),
-                        });
-                    }
-                }
-
-                for (const rs of remote) {
-                    if (!localMap.has(rs.id)) {
-                        await wgFetch('/staff/' + encodeURIComponent(rs.id), { method: 'DELETE' });
-                    }
-                }
-            } catch {
-                wgWarnOnce('staff_sync', '⚠️ Sin conexión con API (personal). No se guardaron cambios.');
-                throw new Error('staff_sync_failed');
-            }
-        }
-
-        async function wgBootstrapSync() {
-            try {
-                const [cfgApi, usersApi, staffApi] = await Promise.all([
-                    wgFetch('/config'),
-                    wgFetch('/users'),
-                    wgFetch('/staff'),
-                ]);
-                const cfgUi = wgConfigApiToUi(cfgApi);
-                const usersUi = (usersApi || []).map(wgUserApiToUi);
-                const staffUi = (staffApi || []).map(wgStaffApiToUi);
-
-                wgCache.config = cfgUi;
-                wgCache.users = usersUi;
-                wgCache.staff = staffUi;
-                localStorage.setItem(CFG_KEY, JSON.stringify(cfgUi));
-                localStorage.setItem(CFG_USERS_KEY, JSON.stringify(usersUi));
-
-                if (!usersUi.length) {
-                    const master = {
-                        id: 'usr_master', name: 'Administrador', login: 'admin', pass: '1234',
-                        cargo: 'Master', role: 'master', status: 'active',
-                        modules: ALL_MODULES.map(m => m.id), modulePerms: {}, createdAt: Date.now()
-                    };
-                    const seeded = [master];
-                    wgCache.users = seeded;
-                    localStorage.setItem(CFG_USERS_KEY, JSON.stringify(seeded));
-                    await wgSyncUsersToApi(seeded);
-                }
-
-                if (!wgApiConnectedToastShown) {
-                    wgApiConnectedToastShown = true;
-                    showToast('🔌 Integrado con API NestJS: ' + (window.WG_API_BASE_ACTIVE || wgResolvedApiBase));
-                }
-            } catch {
-                // fallback local only
-                window.WG_API_CONNECTED = false;
-            }
-        }
-
-        function cfgLoad() {
-            if (wgCache.config) return wgCache.config;
-            try {
-                const c = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
-                wgCache.config = c;
-                return c;
-            } catch (e) {
-                return {};
-            }
-        }
-        function cfgSave(d) {
-            wgCache.config = d;
-            localStorage.setItem(CFG_KEY, JSON.stringify(d));
-            wgSyncConfigToApi(d);
-        }
-        function cfgLoadUsers() {
-            if (wgCache.users) return wgCache.users;
-            try {
-                const u = JSON.parse(localStorage.getItem(CFG_USERS_KEY) || '[]');
-                wgCache.users = Array.isArray(u) ? u : [];
-                return wgCache.users;
-            } catch (e) {
-                return [];
-            }
-        }
-        function cfgSaveUsers(d) {
-            wgCache.users = Array.isArray(d) ? d : [];
-            localStorage.setItem(CFG_USERS_KEY, JSON.stringify(wgCache.users));
-            wgSyncUsersToApi(wgCache.users);
-        }
+        function cfgLoad() { try { return JSON.parse(localStorage.getItem(CFG_KEY) || '{}'); } catch (e) { return {}; } }
+        function cfgSave(d) { localStorage.setItem(CFG_KEY, JSON.stringify(d)); }
+        function cfgLoadUsers() { try { return JSON.parse(localStorage.getItem(CFG_USERS_KEY) || '[]'); } catch (e) { return []; } }
+        function cfgSaveUsers(d) { localStorage.setItem(CFG_USERS_KEY, JSON.stringify(d)); }
 
         let cfgCurrentUser = null;
         let cfgRestoreData = null;
@@ -16135,7 +15818,7 @@ ${de ? `<div class="campo"><b>De:</b> ${mEsc(de)}</div>` : ''}
             }
             cfgCurrentUser = null;
             document.body.classList.add('app-locked');
-            setTimeout(() => { wgBootstrapSync().finally(() => cfgShowLogin()); }, 120);
+            setTimeout(cfgShowLogin, 120);
             // Start food service check globally
             setTimeout(cfgCheckFoodService, 2000);
             setInterval(cfgCheckFoodService, 60000);
